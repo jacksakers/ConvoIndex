@@ -52,8 +52,8 @@ using namespace audio_driver;
 #define LCD_RST_PIN  4
 #define LCD_BL_PIN   42
 
-#define DISPLAY_WIDTH  320
-#define DISPLAY_HEIGHT 240
+#define DISPLAY_WIDTH  240
+#define DISPLAY_HEIGHT 320
 
 // ES7210_AD1_AD0_01 (0x82 as 8-bit write addr) matches AUDIO_CODEC_ES7210_ADDR
 // in xiaozhi-esp32-main/main/boards/lafvin-aichatbot/config.h.
@@ -186,23 +186,24 @@ static void drawScreenChrome() {
 
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(16, 16);
+  tft.setCursor(14, 16);
   tft.print("ConvoIndex");
 
   tft.setTextSize(1);
   tft.setTextColor(COLOR_DARK_GREY);
-  tft.setCursor(16, 36);
+  tft.setCursor(14, 38);
   tft.print("Ambient capture node");
 
-  tft.drawRoundRect(14, 52, DISPLAY_WIDTH - 28, 32, 7, COLOR_DARK_GREY);
-  tft.drawRect(14, 94, DISPLAY_WIDTH - 28, 104, COLOR_DARK_GREY);
-  tft.setCursor(20, 100);
+  // Portrait-first layout: status card near top, waveform area below.
+  tft.drawRoundRect(12, 52, DISPLAY_WIDTH - 24, 46, 8, COLOR_DARK_GREY);
+  tft.drawRect(12, 108, DISPLAY_WIDTH - 24, DISPLAY_HEIGHT - 148, COLOR_DARK_GREY);
+  tft.setCursor(18, 114);
   tft.setTextColor(ST77XX_WHITE);
   tft.print("LIVE INPUT ENERGY");
 
-  tft.setCursor(20, DISPLAY_HEIGHT - 28);
+  tft.setCursor(18, DISPLAY_HEIGHT - 22);
   tft.setTextColor(COLOR_DARK_GREY);
-  tft.print("BOOT: pause/resume   ws://capture");
+  tft.print("BOOT toggles mic");
 }
 
 static void drawStatusPanel() {
@@ -210,19 +211,19 @@ static void drawStatusPanel() {
     return;
   }
 
-  tft.fillRect(18, 56, DISPLAY_WIDTH - 36, 24, ST77XX_BLACK);
+  tft.fillRect(16, 58, DISPLAY_WIDTH - 32, 16, ST77XX_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(screenStateColor(screenState));
-  tft.setCursor(24, 62);
+  tft.setCursor(20, 60);
   tft.print(screenStateText(screenState));
 
-  tft.fillRect(18, 202, DISPLAY_WIDTH - 36, 12, ST77XX_BLACK);
+  tft.fillRect(16, 80, DISPLAY_WIDTH - 32, 14, ST77XX_BLACK);
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(20, 204);
-  tft.print("WS: ");
-  tft.print(wsConnected ? "connected" : "disconnected");
-  tft.print("  RMS: ");
+  tft.setCursor(20, 84);
+  tft.print("WS:");
+  tft.print(wsConnected ? "up" : "down");
+  tft.print(" RMS:");
   tft.print(static_cast<int>(lastRms));
 }
 
@@ -239,10 +240,10 @@ static void drawWaveform() {
     return;
   }
 
-  const int originX = 20;
-  const int originY = 186;
-  const int width = DISPLAY_WIDTH - 40;
-  const int height = 80;
+  const int originX = 18;
+  const int originY = DISPLAY_HEIGHT - 46;
+  const int width = DISPLAY_WIDTH - 36;
+  const int height = DISPLAY_HEIGHT - 170;
 
   tft.fillRect(originX, originY - height, width, height, ST77XX_BLACK);
   tft.drawFastHLine(originX, originY, width, COLOR_DARK_GREY);
@@ -264,7 +265,7 @@ static void initializeDisplay() {
   tft.init(240, 320);
   tft.setSPISpeed(40000000);
   tft.invertDisplay(true);
-  tft.setRotation(1);  // Landscape 320x240
+  tft.setRotation(0);  // Portrait 240x320 with natural orientation
 
   displayReady = true;
   drawScreenChrome();
