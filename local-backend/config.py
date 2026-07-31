@@ -7,6 +7,13 @@ WEBSOCKET_PORT = 8004
 # Port for the HTTP OTA check-in server (handles GET and POST requests cleanly)
 OTA_PORT = 8003
 
+# ConvoIndex Phase 1: raw-audio capture WebSocket server (see capture_server.py)
+CAPTURE_PORT = 8005
+CAPTURE_SAMPLE_RATE = 16000
+CAPTURE_CHANNELS = 1
+CAPTURE_SAMPLE_WIDTH = 2  # bytes (16-bit PCM)
+CAPTURE_DIR = "captures"
+
 # Ollama settings (Local LLM)
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:0.5b"  # Change to any fast local model you have installed, e.g. "qwen2.5:0.5b" or "phi3"

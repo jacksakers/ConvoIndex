@@ -1,0 +1,88 @@
+Product Requirements Document: ConvoIndex
+
+Vision: A privacy-first, locally hosted ambient listening device that acts as a continuous memory augmentation tool. It captures living room conversations, processes them through a local AI, and securely indexes the data for search, task extraction, and reporting.
+1. System Architecture
+
+The core philosophy is a "dumb terminal, genius server" model. The ESP32 handles physical I/O, while the server handles all state, processing, and UI.
+Hardware Node (ESP32 S3)
+
+    Firmware: Written in C++.
+
+    Audio Capture: Continuous I2S microphone sampling. Implements basic Voice Activity Detection (VAD) locally so it only streams data when someone is actually speaking, saving network bandwidth.
+
+    Networking: WebSocket client maintaining a persistent, low-latency connection to the local server.
+
+    Display: Minimal UI rendering (e.g., a dynamic waveform or simple status icons).
+
+    Audio Output: I2S speaker for system chimes or brief JARVIS confirmations.
+
+Local Server & Web App
+
+    Ingestion Pipeline: A WebSocket server receives the audio chunks.
+
+    Transcription: Raw audio is piped directly into a local instance of Whisper (or Faster-Whisper) for high-accuracy speech-to-text.
+
+    Database: Transcripts are stored with timestamps in a SQLite database.
+
+    Intelligence (JARVIS): The Whisper text output is fed to your local Gemma4 model for entity extraction, summarization, and task generation.
+
+    Web Interface: A local dashboard built with React, Vite, and Tailwind CSS serves as the search engine and configuration portal.
+
+2. Feature Specifications
+A. The Ambient UI (Screen & RGB LED)
+
+The device needs to clearly communicate its state without being distracting in a living room environment.
+
+    Listening State (Idle): Screen is black or shows a dim clock. RGB LED pulses a slow, faint blue.
+
+    Capturing State (Voice Detected): Screen wakes up to display a real-time, smooth audio waveform. RGB LED shifts to a solid, brighter blue or green.
+
+    Processing State: Once a conversational pause is detected and audio is sent for transcription, the LED spins or pulses yellow to indicate JARVIS is "thinking."
+
+    Muted/Private State: A physical button (or web toggle) mutes the mic. The RGB LED turns solid red, and the screen explicitly displays a "Mic Disabled" icon.
+
+B. Audio I/O (Mic & Speaker)
+
+    The Mic: Tuned for far-field room capture. The C++ firmware should implement a rolling buffer so it captures the first few milliseconds of speech before the VAD officially triggers.
+
+    The Speaker: Used sparingly to avoid interrupting natural conversation. It should trigger subtle, pleasant chimes for state changes (e.g., a soft chime when JARVIS successfully extracts a task, or a low boop if the WiFi drops).
+
+C. JARVIS Integration (Gemma4)
+
+Instead of just a massive wall of text, JARVIS will act as an asynchronous processor that runs periodically (e.g., every 5 minutes of silence, or at the end of the day).
+
+    Task Extraction: Gemma4 scans the SQLite database for action items. For example, if it hears, "We need to grab food for Dexter this weekend," or "I'll call Kelsey about the venue tomorrow," it isolates these into a structured To-Do list.
+
+    Topic Summarization: It chunks long conversations into summaries (e.g., "Discussed dinner plans and upcoming software project").
+
+    Contextual Memory: JARVIS can use these indexed transcripts as a knowledge base. You can later ask your desktop JARVIS instance, "What did we decide about the vacation budget last night?" and it will query the ConvoIndex database.
+
+D. The Web App Indexer
+
+    Timeline View: A clean, infinite-scroll feed of transcribed blocks, similar to a messaging app.
+
+    Full-Text Search: Instantly search historical conversations by keyword.
+
+    Insights Dashboard: A sidebar displaying auto-generated action items and summaries from Gemma4.
+
+3. Development Phases
+
+    Phase 1: The Dumb Pipe (ESP32 -> Server)
+
+        Get the ESP32 to capture I2S mic data and stream it over WebSockets. Save the raw audio file on the server to verify quality.
+
+    Phase 2: Transcription & Storage
+
+        Route the server's audio chunks into Whisper. Pipe the text output into your SQLite database with timestamps.
+
+    Phase 3: The Front-End
+
+        Spin up the React/Vite app. Connect it to the SQLite database to enable viewing and searching the raw transcripts.
+
+    Phase 4: Hardware Polish
+
+        Add the visual feedback loop: code the C++ to drive the screen (waveform) and the RGB LED based on server status over the WebSocket.
+
+    Phase 5: JARVIS Integration
+
+        Write the server scripts to feed SQLite data to Gemma4, extract the metadata, and display those insights in the React web app.
