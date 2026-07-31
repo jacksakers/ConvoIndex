@@ -80,6 +80,11 @@ sqlite3 captures/transcripts.db \
   - Idle: dim breathing cool tones
   - Recording: colorful speech-reactive animation
   - Paused/disconnected: distinct warning colors
+- Screen behavior (ST7789):
+  - Reuses the same LAFVIN ST7789 wiring/pin mapping from the XiaoZhi board implementation
+  - Shows current state (`BOOTING`, `CONNECTING WIFI`, `CONNECTING SERVER`, `STANDBY`, `LISTENING`, `MIC PAUSED`)
+  - Shows connection + live RMS telemetry
+  - Draws a real-time energy waveform panel while audio is sampled
 
 ## VAD + LED tuning
 
@@ -89,3 +94,8 @@ In `src/main.cpp` you can tune:
 - `VAD_HANGOVER_MS`: silence time before recording stops
 - `VAD_PRE_ROLL_FRAMES`: short buffer before speech start
 - `LED_GLOBAL_BRIGHTNESS`: overall LED intensity
+
+Display tuning values in `src/main.cpp`:
+
+- `DISPLAY_REFRESH_MS`: UI redraw interval
+- `LCD_*_PIN` constants: ST7789 wiring

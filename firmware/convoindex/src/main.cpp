@@ -14,6 +14,9 @@
 #include <Wire.h>
 #include <WebSocketsClient.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
 #include <driver/i2s.h>
 #include <driver/gpio.h>
 
@@ -41,6 +44,17 @@ using namespace audio_driver;
 #define I2C_SDA_PIN 1
 #define I2C_SCL_PIN 2
 
+// Reuse XiaoZhi LAFVIN ST7789 pinout.
+#define LCD_SCLK_PIN 41
+#define LCD_MOSI_PIN 40
+#define LCD_CS_PIN   47
+#define LCD_DC_PIN   39
+#define LCD_RST_PIN  4
+#define LCD_BL_PIN   42
+
+#define DISPLAY_WIDTH  320
+#define DISPLAY_HEIGHT 240
+
 // ES7210_AD1_AD0_01 (0x82 as 8-bit write addr) matches AUDIO_CODEC_ES7210_ADDR
 // in xiaozhi-esp32-main/main/boards/lafvin-aichatbot/config.h.
 #define ES7210_I2C_ADDR (ES7210_AD1_AD0_01 >> 1)
@@ -64,6 +78,8 @@ static constexpr int VAD_PRE_ROLL_FRAMES = 7;
 // LED animation tuning.
 static constexpr uint8_t LED_GLOBAL_BRIGHTNESS = 72;
 static constexpr uint32_t LED_BOOT_SHOW_MS = 900;
+static constexpr uint32_t DISPLAY_REFRESH_MS = 85;
+static constexpr uint16_t COLOR_DARK_GREY = 0x7BEF;
 
 // The ES7210/ES8311 combo on this board is wired for 2 I2S slots
 // (mic + AEC reference channel); we only forward the mic channel (slot 0).
@@ -79,6 +95,13 @@ static bool wsConnected = false;
 
 static Adafruit_NeoPixel rgbLed(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static SPIClass lcdSpi(FSPI);
+#else
+static SPIClass lcdSpi(HSPI);
+#endif
+static Adafruit_ST7789 tft(&lcdSpi, LCD_CS_PIN, LCD_DC_PIN, LCD_RST_PIN);
+
 enum class LedMode {
   kBoot,
   kIdle,
@@ -93,11 +116,197 @@ static bool speechActive = false;
 static uint32_t speechStartedMs = 0;
 static uint32_t lastSpeechMs = 0;
 static uint32_t bootMs = 0;
+static bool displayReady = false;
+static uint32_t lastDisplayMs = 0;
+
+enum class ScreenState {
+  kBoot,
+  kConnectingWifi,
+  kConnectingServer,
+  kIdle,
+  kListening,
+  kPaused,
+};
+
+static ScreenState screenState = ScreenState::kBoot;
+static ScreenState lastDrawnState = ScreenState::kBoot;
+static uint8_t rmsHistory[96] = {0};
+static int rmsHistoryPos = 0;
 
 static int16_t preRollFrames[VAD_PRE_ROLL_FRAMES][READ_FRAMES];
 static size_t preRollSizes[VAD_PRE_ROLL_FRAMES];
 static int preRollHead = 0;
 static int preRollCount = 0;
+
+static const char* screenStateText(ScreenState s) {
+  switch (s) {
+    case ScreenState::kBoot:
+      return "BOOTING";
+    case ScreenState::kConnectingWifi:
+      return "CONNECTING WIFI";
+    case ScreenState::kConnectingServer:
+      return "CONNECTING SERVER";
+    case ScreenState::kIdle:
+      return "STANDBY";
+    case ScreenState::kListening:
+      return "LISTENING";
+    case ScreenState::kPaused:
+      return "MIC PAUSED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+static uint16_t screenStateColor(ScreenState s) {
+  switch (s) {
+    case ScreenState::kBoot:
+      return ST77XX_CYAN;
+    case ScreenState::kConnectingWifi:
+      return ST77XX_YELLOW;
+    case ScreenState::kConnectingServer:
+      return ST77XX_MAGENTA;
+    case ScreenState::kIdle:
+      return ST77XX_GREEN;
+    case ScreenState::kListening:
+      return ST77XX_CYAN;
+    case ScreenState::kPaused:
+      return ST77XX_RED;
+    default:
+      return ST77XX_WHITE;
+  }
+}
+
+static void drawScreenChrome() {
+  if (!displayReady) {
+    return;
+  }
+  tft.fillScreen(ST77XX_BLACK);
+  tft.drawRoundRect(6, 6, DISPLAY_WIDTH - 12, DISPLAY_HEIGHT - 12, 8, COLOR_DARK_GREY);
+  tft.setTextWrap(false);
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(16, 16);
+  tft.print("ConvoIndex");
+
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_DARK_GREY);
+  tft.setCursor(16, 36);
+  tft.print("Ambient capture node");
+
+  tft.drawRoundRect(14, 52, DISPLAY_WIDTH - 28, 32, 7, COLOR_DARK_GREY);
+  tft.drawRect(14, 94, DISPLAY_WIDTH - 28, 104, COLOR_DARK_GREY);
+  tft.setCursor(20, 100);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print("LIVE INPUT ENERGY");
+
+  tft.setCursor(20, DISPLAY_HEIGHT - 28);
+  tft.setTextColor(COLOR_DARK_GREY);
+  tft.print("BOOT: pause/resume   ws://capture");
+}
+
+static void drawStatusPanel() {
+  if (!displayReady) {
+    return;
+  }
+
+  tft.fillRect(18, 56, DISPLAY_WIDTH - 36, 24, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(screenStateColor(screenState));
+  tft.setCursor(24, 62);
+  tft.print(screenStateText(screenState));
+
+  tft.fillRect(18, 202, DISPLAY_WIDTH - 36, 12, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(20, 204);
+  tft.print("WS: ");
+  tft.print(wsConnected ? "connected" : "disconnected");
+  tft.print("  RMS: ");
+  tft.print(static_cast<int>(lastRms));
+}
+
+static void pushRmsHistory(float rms) {
+  float norm = rms / 3000.0f;
+  if (norm < 0.0f) norm = 0.0f;
+  if (norm > 1.0f) norm = 1.0f;
+  rmsHistory[rmsHistoryPos] = static_cast<uint8_t>(norm * 90.0f);
+  rmsHistoryPos = (rmsHistoryPos + 1) % static_cast<int>(sizeof(rmsHistory));
+}
+
+static void drawWaveform() {
+  if (!displayReady) {
+    return;
+  }
+
+  const int originX = 20;
+  const int originY = 186;
+  const int width = DISPLAY_WIDTH - 40;
+  const int height = 80;
+
+  tft.fillRect(originX, originY - height, width, height, ST77XX_BLACK);
+  tft.drawFastHLine(originX, originY, width, COLOR_DARK_GREY);
+
+  uint16_t color = speechActive ? ST77XX_CYAN : ST77XX_BLUE;
+  int histLen = static_cast<int>(sizeof(rmsHistory));
+  for (int x = 0; x < width; x += 3) {
+    int idx = (rmsHistoryPos + (x / 3)) % histLen;
+    int bar = rmsHistory[idx];
+    tft.drawFastVLine(originX + x, originY - bar, bar, color);
+  }
+}
+
+static void initializeDisplay() {
+  pinMode(LCD_BL_PIN, OUTPUT);
+  digitalWrite(LCD_BL_PIN, HIGH);
+
+  lcdSpi.begin(LCD_SCLK_PIN, -1, LCD_MOSI_PIN, LCD_CS_PIN);
+  tft.init(240, 320);
+  tft.setSPISpeed(40000000);
+  tft.invertDisplay(true);
+  tft.setRotation(1);  // Landscape 320x240
+
+  displayReady = true;
+  drawScreenChrome();
+  drawStatusPanel();
+}
+
+static void updateDisplay() {
+  if (!displayReady) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - lastDisplayMs < DISPLAY_REFRESH_MS) {
+    return;
+  }
+  lastDisplayMs = now;
+
+  if (!streaming) {
+    screenState = ScreenState::kPaused;
+  } else if (WiFi.status() != WL_CONNECTED) {
+    screenState = ScreenState::kConnectingWifi;
+  } else if (!wsConnected) {
+    screenState = ScreenState::kConnectingServer;
+  } else if (speechActive) {
+    screenState = ScreenState::kListening;
+  } else if (now - bootMs < LED_BOOT_SHOW_MS) {
+    screenState = ScreenState::kBoot;
+  } else {
+    screenState = ScreenState::kIdle;
+  }
+
+  if (screenState != lastDrawnState) {
+    drawStatusPanel();
+    lastDrawnState = screenState;
+  } else {
+    // Keep status telemetry fresh (RMS/connection line) while state is unchanged.
+    drawStatusPanel();
+  }
+
+  pushRmsHistory(lastRms);
+  drawWaveform();
+}
 
 static void sendVadEvent(const char* state, float rms) {
   if (!wsConnected) {
@@ -390,6 +599,8 @@ void setup() {
   setLedRgb(0, 0, 0);
   bootMs = millis();
 
+  initializeDisplay();
+
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
 
   i2cScan();
@@ -449,6 +660,7 @@ void loop() {
   }
 
   lastRms = calculateRms(mono_buf, stereo_frames);
+  updateDisplay();
 
   if (!streaming || !wsConnected) {
     resetVoiceState(false);
