@@ -12,7 +12,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
-#include <driver/i2s_std.h>
+#include <driver/i2s.h>
 #include <driver/gpio.h>
 
 #include "AudioBoard.h"
@@ -46,7 +46,7 @@ static int16_t mono_buf[READ_FRAMES];
 static DriverDeviceInfo codecPins;
 static AudioBoard codecBoard{AudioDriverES8311_ES7210, codecPins};
 
-static i2s_chan_handle_t rx_handle = nullptr;
+static constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
 static WebSocketsClient webSocket;
 static bool streaming = false;
 static bool wsConnected = false;
@@ -80,31 +80,32 @@ static bool setupCodec() {
 }
 
 static bool setupI2SRx() {
-  i2s_chan_config_t chan_cfg =
-      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  if (i2s_new_channel(&chan_cfg, nullptr, &rx_handle) != ESP_OK) {
-    return false;
-  }
-
-  i2s_std_config_t std_cfg = {
-      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-          I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-      .gpio_cfg =
-          {
-              .mclk = static_cast<gpio_num_t>(I2S_MCLK_PIN),
-              .bclk = static_cast<gpio_num_t>(I2S_BCLK_PIN),
-              .ws = static_cast<gpio_num_t>(I2S_WS_PIN),
-              .dout = I2S_GPIO_UNUSED,
-              .din = static_cast<gpio_num_t>(I2S_DIN_PIN),
-              .invert_flags = {.mclk_inv = false, .bclk_inv = false, .ws_inv = false},
-          },
+  i2s_config_t i2s_config = {
+      .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
+      .sample_rate = SAMPLE_RATE,
+      .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+      .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+      .dma_buf_count = 6,
+      .dma_buf_len = READ_FRAMES,
+      .use_apll = false,
+      .tx_desc_auto_clear = false,
+      .fixed_mclk = 0,
   };
 
-  if (i2s_channel_init_std_mode(rx_handle, &std_cfg) != ESP_OK) {
+  i2s_pin_config_t pin_config = {
+      .mck_io_num = I2S_MCLK_PIN,
+      .bck_io_num = I2S_BCLK_PIN,
+      .ws_io_num = I2S_WS_PIN,
+      .data_out_num = I2S_PIN_NO_CHANGE,
+      .data_in_num = I2S_DIN_PIN,
+  };
+
+  if (i2s_driver_install(I2S_PORT, &i2s_config, 0, nullptr) != ESP_OK) {
     return false;
   }
-  return i2s_channel_enable(rx_handle) == ESP_OK;
+  return i2s_set_pin(I2S_PORT, &pin_config) == ESP_OK;
 }
 
 static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -179,9 +180,8 @@ void loop() {
   handleBootButton();
 
   size_t bytes_read = 0;
-  esp_err_t err = i2s_channel_read(rx_handle, i2s_stereo_buf,
-                                    sizeof(i2s_stereo_buf), &bytes_read,
-                                    /*timeout_ms=*/100);
+  esp_err_t err = i2s_read(I2S_PORT, i2s_stereo_buf, sizeof(i2s_stereo_buf),
+                           &bytes_read, pdMS_TO_TICKS(100));
   if (err != ESP_OK || bytes_read == 0) {
     return;
   }
