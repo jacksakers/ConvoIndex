@@ -22,6 +22,12 @@ TRANSCRIPT_MIN_DURATION_SECONDS = 0.5
 # Keep rows even when transcription is empty (useful for debugging).
 TRANSCRIPT_STORE_EMPTY = False
 
+# Phase 2.5/3: segment long sessions into utterances with VAD and expose APIs.
+SEGMENT_ON_SILENCE = True
+SEGMENT_PRE_ROLL_SECONDS = 0.25
+TRANSCRIPT_API_HOST = "0.0.0.0"
+TRANSCRIPT_API_PORT = 8010
+
 # Ollama settings (Local LLM)
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:0.5b"  # Change to any fast local model you have installed, e.g. "qwen2.5:0.5b" or "phi3"
@@ -41,7 +47,7 @@ OLLAMA_KEEP_ALIVE = "30m"
 STT_PROVIDER = "local_whisper" 
 WHISPER_MODEL_SIZE = "tiny"  # Choose from 'tiny', 'base', 'small', etc. 'tiny' is extremely fast on CPU.
 # Boost low-level PCM before Whisper if your mic signal is quiet. 1.0 = no gain.
-STT_INPUT_GAIN = 2.5
+STT_INPUT_GAIN = 5
 
 # Text-to-Speech (TTS) Settings
 # Provider can be "edge_tts" (Microsoft Edge, high quality, free but requires internet) or "pyttsx3" (fully offline, lower quality)

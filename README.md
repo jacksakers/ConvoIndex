@@ -96,3 +96,48 @@ You can open `local-backend/config.py` to change settings like:
 *   `VAD_THRESHOLD`: Increase if your mic is in a noisy room to prevent false speaking triggers.
 *   `STT_PROVIDER`: Swap between local whisper and cloud engines.
 *   `TTS_VOICE`: Swap between English, Chinese, or multi-lingual speaking voices.
+
+---
+
+## 📚 ConvoIndex Phase 3 (Transcript Index UI)
+
+Phase 3 adds a local web dashboard for viewing and searching transcripts stored in SQLite.
+
+### What was added
+
+1. **Utterance segmentation inside long capture sessions**
+   - `local-backend/capture_server.py` now uses VAD to cut a single long connection into segment-level transcript rows.
+2. **Transcript metadata for quality/debugging**
+   - Each row stores `word_count`, `char_count`, `avg_rms`, `peak_abs`, `stt_model`, and `stt_input_gain`.
+3. **Local Transcript API**
+   - `GET /api/transcripts?q=&limit=&offset=` on `http://<host>:8010`
+4. **React/Vite timeline/search UI**
+   - Located in `web-indexer/`
+
+### Run Phase 3
+
+1. Start capture/transcription + API backend:
+
+```bash
+python -m local-backend.capture_server
+```
+
+2. Start the web UI:
+
+```bash
+cd web-indexer
+npm install
+npm run dev
+```
+
+3. Open:
+
+```text
+http://localhost:5173
+```
+
+### API quick check
+
+```bash
+curl "http://127.0.0.1:8010/api/transcripts?limit=5"
+```

@@ -69,8 +69,20 @@ sqlite3 captures/transcripts.db \
 
 ## Behavior
 
-- On boot, connects to WiFi and to the capture server, then streams mono
-  16 kHz / 16-bit PCM continuously.
-- Press the BOOT button to pause/resume streaming (useful for isolating
-  clips during testing).
-- The speaker amp (PA) stays disabled — this phase is capture-only.
+- On boot, connects to WiFi and to the capture server.
+- Device-side VAD is enabled: audio is only streamed while speech is
+  detected (plus a short pre-roll and hangover to avoid clipped words).
+- Press the BOOT button to pause/resume streaming.
+- RGB LED behavior:
+  - Idle: dim breathing cool tones
+  - Recording: colorful speech-reactive animation
+  - Paused/disconnected: distinct warning colors
+
+## VAD + LED tuning
+
+In `src/main.cpp` you can tune:
+
+- `VAD_START_RMS` and `VAD_STOP_RMS`: detection sensitivity
+- `VAD_HANGOVER_MS`: silence time before recording stops
+- `VAD_PRE_ROLL_FRAMES`: short buffer before speech start
+- `LED_GLOBAL_BRIGHTNESS`: overall LED intensity

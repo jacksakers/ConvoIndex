@@ -13,6 +13,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <WebSocketsClient.h>
+#include <Adafruit_NeoPixel.h>
 #include <driver/i2s.h>
 #include <driver/gpio.h>
 
@@ -44,12 +45,25 @@ using namespace audio_driver;
 // in xiaozhi-esp32-main/main/boards/lafvin-aichatbot/config.h.
 #define ES7210_I2C_ADDR (ES7210_AD1_AD0_01 >> 1)
 
-#define PA_ENABLE_PIN GPIO_NUM_48  // keep speaker amp disabled during capture-only phase
 #define BOOT_BUTTON_PIN GPIO_NUM_0
+
+// On this board GPIO48 is typically routed to the onboard LED data path.
+#define RGB_LED_PIN 48
+#define RGB_LED_COUNT 1
 
 // ---- Audio format (must match local-backend/config.py SAMPLE_RATE/CHANNELS) ----
 static constexpr uint32_t SAMPLE_RATE = 16000;
 static constexpr int READ_FRAMES = 512;  // stereo frames per I2S read
+
+// Device-side VAD for Phase 4: only stream audio while speech is detected.
+static constexpr float VAD_START_RMS = 1200.0f;
+static constexpr float VAD_STOP_RMS = 900.0f;
+static constexpr uint32_t VAD_HANGOVER_MS = 650;
+static constexpr int VAD_PRE_ROLL_FRAMES = 7;
+
+// LED animation tuning.
+static constexpr uint8_t LED_GLOBAL_BRIGHTNESS = 72;
+static constexpr uint32_t LED_BOOT_SHOW_MS = 900;
 
 // The ES7210/ES8311 combo on this board is wired for 2 I2S slots
 // (mic + AEC reference channel); we only forward the mic channel (slot 0).
@@ -62,6 +76,189 @@ static constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
 static WebSocketsClient webSocket;
 static bool streaming = false;
 static bool wsConnected = false;
+
+static Adafruit_NeoPixel rgbLed(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+
+enum class LedMode {
+  kBoot,
+  kIdle,
+  kRecording,
+  kPaused,
+  kDisconnected,
+};
+
+static LedMode ledMode = LedMode::kBoot;
+static float lastRms = 0.0f;
+static bool speechActive = false;
+static uint32_t speechStartedMs = 0;
+static uint32_t lastSpeechMs = 0;
+static uint32_t bootMs = 0;
+
+static int16_t preRollFrames[VAD_PRE_ROLL_FRAMES][READ_FRAMES];
+static size_t preRollSizes[VAD_PRE_ROLL_FRAMES];
+static int preRollHead = 0;
+static int preRollCount = 0;
+
+static void setLedRgb(uint8_t r, uint8_t g, uint8_t b) {
+  rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
+  rgbLed.show();
+}
+
+static uint8_t triWave(uint16_t x) {
+  x %= 510;
+  if (x <= 255) {
+    return static_cast<uint8_t>(x);
+  }
+  return static_cast<uint8_t>(510 - x);
+}
+
+static void wheel(uint8_t pos, uint8_t* r, uint8_t* g, uint8_t* b) {
+  if (pos < 85) {
+    *r = static_cast<uint8_t>(pos * 3);
+    *g = static_cast<uint8_t>(255 - pos * 3);
+    *b = 0;
+    return;
+  }
+  if (pos < 170) {
+    pos = static_cast<uint8_t>(pos - 85);
+    *r = static_cast<uint8_t>(255 - pos * 3);
+    *g = 0;
+    *b = static_cast<uint8_t>(pos * 3);
+    return;
+  }
+  pos = static_cast<uint8_t>(pos - 170);
+  *r = 0;
+  *g = static_cast<uint8_t>(pos * 3);
+  *b = static_cast<uint8_t>(255 - pos * 3);
+}
+
+static void updateLed() {
+  const uint32_t now = millis();
+
+  if (!streaming) {
+    ledMode = LedMode::kPaused;
+  } else if (!wsConnected) {
+    ledMode = LedMode::kDisconnected;
+  } else if (speechActive) {
+    ledMode = LedMode::kRecording;
+  } else if (now - bootMs < LED_BOOT_SHOW_MS) {
+    ledMode = LedMode::kBoot;
+  } else {
+    ledMode = LedMode::kIdle;
+  }
+
+  uint8_t r = 0;
+  uint8_t g = 0;
+  uint8_t b = 0;
+
+  switch (ledMode) {
+    case LedMode::kBoot: {
+      uint8_t w = static_cast<uint8_t>((now / 5) & 0xFF);
+      wheel(w, &r, &g, &b);
+      break;
+    }
+    case LedMode::kIdle: {
+      uint8_t breath = triWave(static_cast<uint16_t>((now / 6) % 510));
+      r = 0;
+      g = static_cast<uint8_t>(breath / 4);
+      b = static_cast<uint8_t>(18 + breath / 2);
+      break;
+    }
+    case LedMode::kPaused: {
+      uint8_t breath = triWave(static_cast<uint16_t>((now / 5) % 510));
+      r = static_cast<uint8_t>(20 + breath / 3);
+      g = 0;
+      b = static_cast<uint8_t>(20 + breath / 5);
+      break;
+    }
+    case LedMode::kDisconnected: {
+      uint8_t pulse = triWave(static_cast<uint16_t>((now / 3) % 510));
+      r = static_cast<uint8_t>(20 + pulse / 2);
+      g = static_cast<uint8_t>(pulse / 8);
+      b = 0;
+      break;
+    }
+    case LedMode::kRecording: {
+      float norm = lastRms / 5000.0f;
+      if (norm < 0.0f) norm = 0.0f;
+      if (norm > 1.0f) norm = 1.0f;
+
+      uint32_t sinceStart = now - speechStartedMs;
+      uint8_t base = static_cast<uint8_t>((now / 4) & 0xFF);
+      uint8_t localR = 0;
+      uint8_t localG = 0;
+      uint8_t localB = 0;
+      wheel(base, &localR, &localG, &localB);
+
+      float gain = 0.18f + norm * 0.82f;
+      r = static_cast<uint8_t>(localR * gain);
+      g = static_cast<uint8_t>(localG * gain);
+      b = static_cast<uint8_t>(localB * gain);
+
+      // Quick sparkle burst right when recording starts.
+      if (sinceStart < 280 && (sinceStart / 45) % 2 == 0) {
+        r = 255;
+        g = 255;
+        b = 255;
+      }
+      break;
+    }
+  }
+
+  setLedRgb(r, g, b);
+}
+
+static float calculateRms(const int16_t* samples, size_t sampleCount) {
+  if (sampleCount == 0) {
+    return 0.0f;
+  }
+  double sumSquares = 0.0;
+  for (size_t i = 0; i < sampleCount; i++) {
+    double v = static_cast<double>(samples[i]);
+    sumSquares += v * v;
+  }
+  return static_cast<float>(sqrt(sumSquares / static_cast<double>(sampleCount)));
+}
+
+static void resetVoiceState() {
+  speechActive = false;
+  preRollHead = 0;
+  preRollCount = 0;
+}
+
+static void pushPreRoll(const int16_t* samples, size_t sampleCount) {
+  if (sampleCount > READ_FRAMES) {
+    sampleCount = READ_FRAMES;
+  }
+
+  memcpy(preRollFrames[preRollHead], samples, sampleCount * sizeof(int16_t));
+  preRollSizes[preRollHead] = sampleCount;
+  preRollHead = (preRollHead + 1) % VAD_PRE_ROLL_FRAMES;
+  if (preRollCount < VAD_PRE_ROLL_FRAMES) {
+    preRollCount++;
+  }
+}
+
+static void sendAudioFrame(const int16_t* samples, size_t sampleCount) {
+  if (!streaming || !wsConnected || sampleCount == 0) {
+    return;
+  }
+  webSocket.sendBIN(
+      reinterpret_cast<const uint8_t*>(samples),
+      sampleCount * sizeof(int16_t));
+}
+
+static void flushPreRoll() {
+  if (preRollCount == 0) {
+    return;
+  }
+  int oldest = (preRollHead - preRollCount + VAD_PRE_ROLL_FRAMES) % VAD_PRE_ROLL_FRAMES;
+  for (int i = 0; i < preRollCount; i++) {
+    int idx = (oldest + i) % VAD_PRE_ROLL_FRAMES;
+    sendAudioFrame(preRollFrames[idx], preRollSizes[idx]);
+  }
+  preRollCount = 0;
+}
 
 // Raw bus probe (bypasses the audio-driver lib) to tell wiring/power issues
 // apart from wrong-address issues.
@@ -85,9 +282,6 @@ static void i2cScan() {
 }
 
 static bool setupCodec() {
-  pinMode(PA_ENABLE_PIN, OUTPUT);
-  digitalWrite(PA_ENABLE_PIN, LOW);  // amp stays muted, we only capture in phase 1
-
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
   mic.setWire(&Wire);
   mic.setAddress(ES7210_I2C_ADDR);
@@ -146,6 +340,8 @@ static bool setupI2SRx() {
 }
 
 static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  (void)payload;
+  (void)length;
   switch (type) {
     case WStype_CONNECTED:
       Serial.println("WebSocket connected to capture server");
@@ -154,6 +350,7 @@ static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     case WStype_DISCONNECTED:
       Serial.println("WebSocket disconnected");
       wsConnected = false;
+      resetVoiceState();
       break;
     default:
       break;
@@ -174,7 +371,12 @@ static void connectWifi() {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nConvoIndex Phase 1 — I2S capture -> WebSocket");
+  Serial.println("\nConvoIndex Phase 4 - VAD gated capture + reactive LED");
+
+  rgbLed.begin();
+  rgbLed.setBrightness(LED_GLOBAL_BRIGHTNESS);
+  setLedRgb(0, 0, 0);
+  bootMs = millis();
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
 
@@ -195,9 +397,9 @@ void setup() {
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(3000);
 
-  // Streaming starts automatically; hold BOOT to pause/resume for testing.
+  // Streaming starts automatically; hold BOOT to pause/resume.
   streaming = true;
-  Serial.println("Streaming mic audio. Hold BOOT button to pause/resume.");
+  Serial.println("Device-side VAD active: only speech is streamed.");
 }
 
 static void handleBootButton() {
@@ -209,6 +411,9 @@ static void handleBootButton() {
     lastPressed = pressed;
     if (pressed) {
       streaming = !streaming;
+      if (!streaming) {
+        resetVoiceState();
+      }
       Serial.printf("Streaming %s\n", streaming ? "resumed" : "paused");
     }
   }
@@ -217,6 +422,7 @@ static void handleBootButton() {
 void loop() {
   webSocket.loop();
   handleBootButton();
+  updateLed();
 
   size_t bytes_read = 0;
   esp_err_t err = i2s_read(I2S_PORT, i2s_stereo_buf, sizeof(i2s_stereo_buf),
@@ -230,8 +436,36 @@ void loop() {
     mono_buf[i] = i2s_stereo_buf[i * 2];  // slot 0 = mic channel
   }
 
-  if (streaming && wsConnected) {
-    webSocket.sendBIN(reinterpret_cast<uint8_t*>(mono_buf),
-                       stereo_frames * sizeof(int16_t));
+  lastRms = calculateRms(mono_buf, stereo_frames);
+
+  if (!streaming || !wsConnected) {
+    resetVoiceState();
+    return;
+  }
+
+  const uint32_t now = millis();
+
+  if (!speechActive) {
+    pushPreRoll(mono_buf, stereo_frames);
+    if (lastRms >= VAD_START_RMS) {
+      speechActive = true;
+      speechStartedMs = now;
+      lastSpeechMs = now;
+      flushPreRoll();
+      Serial.printf("Speech start (rms=%.1f)\n", lastRms);
+    }
+    return;
+  }
+
+  sendAudioFrame(mono_buf, stereo_frames);
+  if (lastRms >= VAD_STOP_RMS) {
+    lastSpeechMs = now;
+    return;
+  }
+
+  if (now - lastSpeechMs > VAD_HANGOVER_MS) {
+    speechActive = false;
+    preRollCount = 0;
+    Serial.println("Speech stop");
   }
 }

@@ -6,3 +6,5 @@ firmware/*/.pio/
 firmware/*/include/secrets.h
 
 captures/*
+web-indexer/node_modules/
+web-indexer/dist/
