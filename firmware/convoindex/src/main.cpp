@@ -16,7 +16,15 @@
 #include <driver/i2s.h>
 #include <driver/gpio.h>
 
-#include "AudioBoard.h"
+// Drive the ES7210 mic ADC directly instead of going through the
+// arduino-audio-driver library's AudioBoard/AudioDriverCombined wrapper: that
+// wrapper's shared I2C-address plumbing has bugs (see git history) that
+// clobber the ES7210's address. The ES7210 class itself is a straight port
+// of Espressif's own es7210 driver (same one xiaozhi/ESP-IDF uses), so we
+// lose nothing by calling it directly. ES8311 (DAC/speaker) isn't needed for
+// Phase 1 -- the ESP32 is the I2S clock master for both codecs regardless of
+// whether ES8311 is initialized.
+#include "Codecs/es7210/ES7210.h"
 
 #include "secrets.h"
 
@@ -32,6 +40,10 @@ using namespace audio_driver;
 #define I2C_SDA_PIN 1
 #define I2C_SCL_PIN 2
 
+// ES7210_AD1_AD0_01 (0x82 as 8-bit write addr) matches AUDIO_CODEC_ES7210_ADDR
+// in xiaozhi-esp32-main/main/boards/lafvin-aichatbot/config.h.
+#define ES7210_I2C_ADDR (ES7210_AD1_AD0_01 >> 1)
+
 #define PA_ENABLE_PIN GPIO_NUM_48  // keep speaker amp disabled during capture-only phase
 #define BOOT_BUTTON_PIN GPIO_NUM_0
 
@@ -44,8 +56,7 @@ static constexpr int READ_FRAMES = 512;  // stereo frames per I2S read
 static int16_t i2s_stereo_buf[READ_FRAMES * 2];
 static int16_t mono_buf[READ_FRAMES];
 
-static DriverDeviceInfo codecPins;
-static AudioBoard codecBoard{AudioDriverES8311_ES7210, codecPins};
+static ES7210 mic;
 
 static constexpr i2s_port_t I2S_PORT = I2S_NUM_0;
 static WebSocketsClient webSocket;
@@ -73,29 +84,15 @@ static void i2cScan() {
   Serial.printf("I2C scan done, %d device(s) found\n", found);
 }
 
-static void setupCodecPins() {
-  // NOTE: DriverDeviceInfo::addI2C()'s 4th positional arg is documented as
-  // "port" but is actually forwarded into InfoI2C's "address" field (a
-  // library naming bug) -- passing 0 here silently poisons the shared
-  // codec I2C address to 0x0 and breaks ES7210::setAddress() (which, unlike
-  // ES8311's, has no `addr > 0` guard). Must stay -1 (unset).
-  codecPins.addI2C(PinFunction::CODEC, I2C_SCL_PIN, I2C_SDA_PIN, -1, 400000);
-  // mclk, bck, ws, data_out(to codec DAC), data_in(from codec ADC)
-  codecPins.addI2S(PinFunction::CODEC, I2S_MCLK_PIN, I2S_BCLK_PIN, I2S_WS_PIN,
-                    I2S_DOUT_PIN, I2S_DIN_PIN);
-  codecPins.addPin(PinFunction::PA, PA_ENABLE_PIN, PinLogic::Output);
-}
-
 static bool setupCodec() {
-  setupCodecPins();
+  pinMode(PA_ENABLE_PIN, OUTPUT);
+  digitalWrite(PA_ENABLE_PIN, LOW);  // amp stays muted, we only capture in phase 1
 
-  // The LAFVIN shield's ES7210 mic ADC sits at I2C address 0x41 (AD1/AD0=01),
-  // not the arduino-audio-driver library's default of 0x40 (AD1/AD0=00).
-  // See AUDIO_CODEC_ES7210_ADDR (0x82 = 8-bit write addr) in
-  // xiaozhi-esp32-main/main/boards/lafvin-aichatbot/config.h.
-  AudioDriverES7210.setI2CAddress(ES7210_AD1_AD0_01 >> 1);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
+  mic.setWire(&Wire);
+  mic.setAddress(ES7210_I2C_ADDR);
 
-  CodecConfig cfg;
+  codec_config_t cfg{};
   cfg.input_device = ADC_INPUT_ALL;
   cfg.output_device = DAC_OUTPUT_NONE;
   cfg.i2s.mode = MODE_SLAVE;  // ESP32 is the I2S bus master, codec is slave
@@ -104,11 +101,18 @@ static bool setupCodec() {
   cfg.i2s.bits = BIT_LENGTH_16BITS;
   cfg.i2s.channels = CHANNELS2;
 
-  if (!codecBoard.begin(cfg)) {
-    Serial.println("Codec init failed!");
+  if (mic.init(&cfg) != RESULT_OK) {
+    Serial.println("ES7210 init failed!");
     return false;
   }
-  codecBoard.setPAPower(false);  // amp stays muted, we only capture in phase 1
+  if (mic.configI2S(CODEC_MODE_ENCODE, &cfg.i2s) != RESULT_OK) {
+    Serial.println("ES7210 I2S config failed!");
+    return false;
+  }
+  if (mic.ctrlStateActive(CODEC_MODE_ENCODE, true) != RESULT_OK) {
+    Serial.println("ES7210 start failed!");
+    return false;
+  }
   return true;
 }
 

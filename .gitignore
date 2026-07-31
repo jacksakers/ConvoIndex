@@ -4,3 +4,5 @@ __pycache__
 local-backend/captures/
 firmware/*/.pio/
 firmware/*/include/secrets.h
+
+captures/*
