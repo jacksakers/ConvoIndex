@@ -70,9 +70,9 @@ static constexpr uint32_t SAMPLE_RATE = 16000;
 static constexpr int READ_FRAMES = 512;  // stereo frames per I2S read
 
 // Device-side VAD for Phase 4: only stream audio while speech is detected.
-static constexpr float VAD_START_RMS = 900.0f;
+static constexpr float VAD_START_RMS = 200.0f;
 static constexpr float VAD_STOP_RMS = 650.0f;
-static constexpr uint32_t VAD_HANGOVER_MS = 650;
+static constexpr uint32_t VAD_HANGOVER_MS = 5000;
 static constexpr int VAD_PRE_ROLL_FRAMES = 7;
 
 // LED animation tuning.
