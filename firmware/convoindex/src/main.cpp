@@ -56,8 +56,8 @@ static constexpr uint32_t SAMPLE_RATE = 16000;
 static constexpr int READ_FRAMES = 512;  // stereo frames per I2S read
 
 // Device-side VAD for Phase 4: only stream audio while speech is detected.
-static constexpr float VAD_START_RMS = 1200.0f;
-static constexpr float VAD_STOP_RMS = 900.0f;
+static constexpr float VAD_START_RMS = 900.0f;
+static constexpr float VAD_STOP_RMS = 650.0f;
 static constexpr uint32_t VAD_HANGOVER_MS = 650;
 static constexpr int VAD_PRE_ROLL_FRAMES = 7;
 
@@ -98,6 +98,15 @@ static int16_t preRollFrames[VAD_PRE_ROLL_FRAMES][READ_FRAMES];
 static size_t preRollSizes[VAD_PRE_ROLL_FRAMES];
 static int preRollHead = 0;
 static int preRollCount = 0;
+
+static void sendVadEvent(const char* state, float rms) {
+  if (!wsConnected) {
+    return;
+  }
+  char payload[96];
+  snprintf(payload, sizeof(payload), "{\"type\":\"vad\",\"state\":\"%s\",\"rms\":%.1f}", state, rms);
+  webSocket.sendTXT(payload);
+}
 
 static void setLedRgb(uint8_t r, uint8_t g, uint8_t b) {
   rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
@@ -220,7 +229,10 @@ static float calculateRms(const int16_t* samples, size_t sampleCount) {
   return static_cast<float>(sqrt(sumSquares / static_cast<double>(sampleCount)));
 }
 
-static void resetVoiceState() {
+static void resetVoiceState(bool notifyStop = false) {
+  if (notifyStop && speechActive) {
+    sendVadEvent("stop", lastRms);
+  }
   speechActive = false;
   preRollHead = 0;
   preRollCount = 0;
@@ -350,7 +362,7 @@ static void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     case WStype_DISCONNECTED:
       Serial.println("WebSocket disconnected");
       wsConnected = false;
-      resetVoiceState();
+      resetVoiceState(false);
       break;
     default:
       break;
@@ -412,7 +424,7 @@ static void handleBootButton() {
     if (pressed) {
       streaming = !streaming;
       if (!streaming) {
-        resetVoiceState();
+        resetVoiceState(true);
       }
       Serial.printf("Streaming %s\n", streaming ? "resumed" : "paused");
     }
@@ -439,7 +451,7 @@ void loop() {
   lastRms = calculateRms(mono_buf, stereo_frames);
 
   if (!streaming || !wsConnected) {
-    resetVoiceState();
+    resetVoiceState(false);
     return;
   }
 
@@ -451,6 +463,7 @@ void loop() {
       speechActive = true;
       speechStartedMs = now;
       lastSpeechMs = now;
+      sendVadEvent("start", lastRms);
       flushPreRoll();
       Serial.printf("Speech start (rms=%.1f)\n", lastRms);
     }
@@ -464,6 +477,7 @@ void loop() {
   }
 
   if (now - lastSpeechMs > VAD_HANGOVER_MS) {
+    sendVadEvent("stop", lastRms);
     speechActive = false;
     preRollCount = 0;
     Serial.println("Speech stop");

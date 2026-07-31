@@ -11,6 +11,7 @@ Run with:
 """
 
 import asyncio
+import json
 import logging
 import os
 import struct
@@ -123,6 +124,7 @@ async def handle_connection(websocket):
     session_pcm = bytearray()
 
     segment_on_silence = bool(getattr(config, "SEGMENT_ON_SILENCE", True))
+    device_vad_mode = False
     vad = EnergyVAD()
     max_pre_roll_bytes = int(
         max(0.0, float(getattr(config, "SEGMENT_PRE_ROLL_SECONDS", 0.25)))
@@ -175,12 +177,49 @@ async def handle_connection(websocket):
         speaking_active = False
     try:
         async for message in websocket:
+            if isinstance(message, str):
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    logger.debug("Ignoring non-JSON text message for [%s]: %s", session_id, message)
+                    continue
+
+                if payload.get("type") == "vad":
+                    device_vad_mode = True
+                    vad_state = payload.get("state")
+                    now_dt = datetime.now(timezone.utc)
+
+                    if vad_state == "start":
+                        if speaking_active and segment_buffer:
+                            await _finalize_segment(now_dt)
+                        speaking_active = True
+                        segment_started_at_dt = now_dt
+                        segment_buffer = bytearray()
+                        pre_roll_chunks.clear()
+                        pre_roll_size = 0
+                        logger.info("Device VAD start [%s]", session_id)
+                    elif vad_state == "stop":
+                        if speaking_active and segment_buffer:
+                            await _finalize_segment(now_dt)
+                        speaking_active = False
+                        segment_started_at_dt = None
+                        segment_buffer = bytearray()
+                        pre_roll_chunks.clear()
+                        pre_roll_size = 0
+                        logger.info("Device VAD stop [%s]", session_id)
+                continue
+
             if isinstance(message, bytes):
                 wav_file.writeframes(message)
                 total_bytes += len(message)
                 session_pcm.extend(message)
 
                 if not segment_on_silence:
+                    continue
+
+                if device_vad_mode:
+                    if speaking_active:
+                        segment_buffer.extend(message)
                     continue
 
                 _append_pre_roll(message)
@@ -257,7 +296,12 @@ async def main():
 
     start_transcript_api_server_in_thread()
 
-    server = await websockets.serve(handle_connection, config.HOST, config.CAPTURE_PORT)
+    server = await websockets.serve(
+        handle_connection,
+        config.HOST,
+        config.CAPTURE_PORT,
+        ping_interval=None,
+    )
     await server.wait_closed()
 
 

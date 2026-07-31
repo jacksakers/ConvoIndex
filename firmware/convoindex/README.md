@@ -72,6 +72,9 @@ sqlite3 captures/transcripts.db \
 - On boot, connects to WiFi and to the capture server.
 - Device-side VAD is enabled: audio is only streamed while speech is
   detected (plus a short pre-roll and hangover to avoid clipped words).
+- Firmware sends explicit `{"type":"vad","state":"start|stop"}` control
+  messages so the backend can finalize and transcribe each utterance as
+  soon as speech ends.
 - Press the BOOT button to pause/resume streaming.
 - RGB LED behavior:
   - Idle: dim breathing cool tones
