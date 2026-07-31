@@ -47,9 +47,25 @@ python -m local-backend.capture_server
 ```
 
 This starts a WebSocket server on port 8005 (see `CAPTURE_PORT` in
-`local-backend/config.py`) that writes each streaming session to a
-timestamped WAV file under `local-backend/captures/` for playback and
-quality verification.
+`local-backend/config.py`).
+
+Phase 1 behavior is unchanged: each streaming session is saved as a
+timestamped WAV capture for playback and quality verification.
+
+Phase 2 is now enabled in the same server:
+
+- On WebSocket disconnect, the captured PCM is transcribed with local Whisper.
+- A transcript row is inserted into SQLite at
+  `captures/transcripts.db` (configurable via `TRANSCRIPT_DB_PATH`).
+- Each row stores: session id, WAV path, start/end timestamps, duration,
+  audio format metadata, and transcript text.
+
+Quick check:
+
+```bash
+sqlite3 captures/transcripts.db \
+  "select id, session_id, started_at, duration_seconds, substr(transcript,1,80) from transcripts order by id desc limit 5;"
+```
 
 ## Behavior
 

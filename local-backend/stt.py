@@ -17,6 +17,7 @@ class SpeechToText:
     def __init__(self, provider=config.STT_PROVIDER, model_size=config.WHISPER_MODEL_SIZE):
         self.provider = provider
         self.model_size = model_size
+        self.input_gain = max(0.1, float(getattr(config, "STT_INPUT_GAIN", 1.0)))
         self.model = None
         
         if self.provider == "local_whisper" and whisper is not None:
@@ -41,6 +42,8 @@ class SpeechToText:
             try:
                 # Convert PCM bytes to float32 NumPy array normalized to [-1.0, 1.0]
                 audio_np = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+                if self.input_gain != 1.0:
+                    audio_np = np.clip(audio_np * self.input_gain, -1.0, 1.0)
                 
                 # Run Whisper transcription
                 logger.info("Transcribing audio with Whisper...")

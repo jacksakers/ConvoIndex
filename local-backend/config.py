@@ -14,6 +14,14 @@ CAPTURE_CHANNELS = 1
 CAPTURE_SAMPLE_WIDTH = 2  # bytes (16-bit PCM)
 CAPTURE_DIR = "captures"
 
+# ConvoIndex Phase 2: transcription + transcript indexing
+# SQLite file used to persist transcripts with timestamps.
+TRANSCRIPT_DB_PATH = "captures/transcripts.db"
+# Skip transcribing very short clips that are usually accidental taps/noise.
+TRANSCRIPT_MIN_DURATION_SECONDS = 0.5
+# Keep rows even when transcription is empty (useful for debugging).
+TRANSCRIPT_STORE_EMPTY = False
+
 # Ollama settings (Local LLM)
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:0.5b"  # Change to any fast local model you have installed, e.g. "qwen2.5:0.5b" or "phi3"
@@ -32,6 +40,8 @@ OLLAMA_KEEP_ALIVE = "30m"
 # Choose "local_whisper" for on-device whisper, or "api" if using external APIs.
 STT_PROVIDER = "local_whisper" 
 WHISPER_MODEL_SIZE = "tiny"  # Choose from 'tiny', 'base', 'small', etc. 'tiny' is extremely fast on CPU.
+# Boost low-level PCM before Whisper if your mic signal is quiet. 1.0 = no gain.
+STT_INPUT_GAIN = 2.5
 
 # Text-to-Speech (TTS) Settings
 # Provider can be "edge_tts" (Microsoft Edge, high quality, free but requires internet) or "pyttsx3" (fully offline, lower quality)
