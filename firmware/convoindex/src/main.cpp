@@ -11,6 +11,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <WebSocketsClient.h>
 #include <driver/i2s.h>
 #include <driver/gpio.h>
@@ -51,8 +52,34 @@ static WebSocketsClient webSocket;
 static bool streaming = false;
 static bool wsConnected = false;
 
+// Raw bus probe (bypasses the audio-driver lib) to tell wiring/power issues
+// apart from wrong-address issues.
+static void i2cScan() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 100000);
+  Serial.println("I2C scan (sda=1 scl=2)...");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      Serial.printf("  found device at 0x%02X (err=%u)\n", addr, err);
+      found++;
+    } else if (err != 2) {
+      // err 2 = NACK on address (no device) -- the expected/common case.
+      // Other codes (1,3,4) indicate a bus-level problem, so log them too.
+      Serial.printf("  addr 0x%02X -> error %u\n", addr, err);
+    }
+  }
+  Serial.printf("I2C scan done, %d device(s) found\n", found);
+}
+
 static void setupCodecPins() {
-  codecPins.addI2C(PinFunction::CODEC, I2C_SCL_PIN, I2C_SDA_PIN, 0, 400000);
+  // NOTE: DriverDeviceInfo::addI2C()'s 4th positional arg is documented as
+  // "port" but is actually forwarded into InfoI2C's "address" field (a
+  // library naming bug) -- passing 0 here silently poisons the shared
+  // codec I2C address to 0x0 and breaks ES7210::setAddress() (which, unlike
+  // ES8311's, has no `addr > 0` guard). Must stay -1 (unset).
+  codecPins.addI2C(PinFunction::CODEC, I2C_SCL_PIN, I2C_SDA_PIN, -1, 400000);
   // mclk, bck, ws, data_out(to codec DAC), data_in(from codec ADC)
   codecPins.addI2S(PinFunction::CODEC, I2S_MCLK_PIN, I2S_BCLK_PIN, I2S_WS_PIN,
                     I2S_DOUT_PIN, I2S_DIN_PIN);
@@ -61,6 +88,12 @@ static void setupCodecPins() {
 
 static bool setupCodec() {
   setupCodecPins();
+
+  // The LAFVIN shield's ES7210 mic ADC sits at I2C address 0x41 (AD1/AD0=01),
+  // not the arduino-audio-driver library's default of 0x40 (AD1/AD0=00).
+  // See AUDIO_CODEC_ES7210_ADDR (0x82 = 8-bit write addr) in
+  // xiaozhi-esp32-main/main/boards/lafvin-aichatbot/config.h.
+  AudioDriverES7210.setI2CAddress(ES7210_AD1_AD0_01 >> 1);
 
   CodecConfig cfg;
   cfg.input_device = ADC_INPUT_ALL;
@@ -140,6 +173,8 @@ void setup() {
   Serial.println("\nConvoIndex Phase 1 — I2S capture -> WebSocket");
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+  i2cScan();
 
   if (!setupCodec()) {
     Serial.println("FATAL: codec bring-up failed, halting.");
